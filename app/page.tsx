@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pause, Play, Volume2, VolumeX } from "lucide-react";
 
 const VIDEO_SRC = "/video.mp4";
@@ -16,65 +16,96 @@ export default function Page() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
 
-  // --------------------------------------------------
-  // Sync volume
-  // --------------------------------------------------
+  // =========================================================
+  // Sync volume with audio element
+  // =========================================================
+
   useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.volume = volume / 100;
-    }
+    const audio = audioRef.current;
+
+    if (!audio) return;
+
+    audio.volume = volume / 100;
   }, [volume]);
 
-  // --------------------------------------------------
-  // Set audio start position when metadata loads
-  // --------------------------------------------------
+  // =========================================================
+  // Set initial audio position once metadata is available
+  // =========================================================
+
   const handleLoadedMetadata = () => {
     const audio = audioRef.current;
 
     if (!audio) return;
 
-    audio.currentTime = START_TIME;
+    if (audio.currentTime < START_TIME) {
+      audio.currentTime = START_TIME;
+    }
+
     audio.volume = volume / 100;
   };
 
-  // --------------------------------------------------
-  // Start audio on FIRST user interaction
-  // --------------------------------------------------
-  useEffect(() => {
-    const startAudio = async () => {
-      const audio = audioRef.current;
+  // =========================================================
+  // Start audio
+  // =========================================================
 
-      if (!audio || hasInteracted) return;
+  const startAudio = useCallback(async () => {
+    const audio = audioRef.current;
 
-      audio.currentTime = START_TIME;
-      audio.volume = volume / 100;
-      audio.muted = false;
+    if (!audio || hasInteracted) return;
 
-      try {
-        await audio.play();
+    /*
+      Start from 50 seconds.
+    */
+    audio.currentTime = START_TIME;
 
-        setPlaying(true);
-        setHasInteracted(true);
+    audio.volume = volume / 100;
+    audio.muted = false;
 
-        window.removeEventListener("pointerdown", startAudio);
-        window.removeEventListener("keydown", startAudio);
-      } catch (err) {
-        console.error("Audio playback failed:", err);
-      }
-    };
+    try {
+      await audio.play();
 
-    window.addEventListener("pointerdown", startAudio);
-    window.addEventListener("keydown", startAudio);
-
-    return () => {
-      window.removeEventListener("pointerdown", startAudio);
-      window.removeEventListener("keydown", startAudio);
-    };
+      setPlaying(true);
+      setHasInteracted(true);
+    } catch (error) {
+      /*
+        This can still happen if the browser decides
+        the interaction isn't sufficient for autoplay.
+      */
+      console.error("Audio playback failed:", error);
+    }
   }, [hasInteracted, volume]);
 
-  // --------------------------------------------------
+  // =========================================================
+  // First user interaction
+  //
+  // This is required because browsers block audible
+  // autoplay without user interaction.
+  // =========================================================
+
+  useEffect(() => {
+    if (hasInteracted) return;
+
+    const handleFirstInteraction = () => {
+      void startAudio();
+    };
+
+    window.addEventListener("pointerdown", handleFirstInteraction, {
+      once: true,
+    });
+
+    window.addEventListener("keydown", handleFirstInteraction, { once: true });
+
+    return () => {
+      window.removeEventListener("pointerdown", handleFirstInteraction);
+
+      window.removeEventListener("keydown", handleFirstInteraction);
+    };
+  }, [hasInteracted, startAudio]);
+
+  // =========================================================
   // Loop audio from START_TIME
-  // --------------------------------------------------
+  // =========================================================
+
   const handleAudioEnd = () => {
     const audio = audioRef.current;
 
@@ -82,15 +113,21 @@ export default function Page() {
 
     audio.currentTime = START_TIME;
 
-    audio.play().catch((err) => {
-      console.error("Audio loop failed:", err);
-      setPlaying(false);
-    });
+    audio
+      .play()
+      .then(() => {
+        setPlaying(true);
+      })
+      .catch((error) => {
+        console.error("Audio loop failed:", error);
+        setPlaying(false);
+      });
   };
 
-  // --------------------------------------------------
+  // =========================================================
   // Play / Pause
-  // --------------------------------------------------
+  // =========================================================
+
   const togglePlay = async () => {
     const audio = audioRef.current;
 
@@ -102,10 +139,18 @@ export default function Page() {
       return;
     }
 
+    /*
+      Make sure playback never starts before
+      the configured start point.
+    */
     if (audio.currentTime < START_TIME) {
       audio.currentTime = START_TIME;
     }
 
+    /*
+      If user presses Play after muting,
+      automatically unmute.
+    */
     if (audioMuted) {
       audio.muted = false;
       setAudioMuted(false);
@@ -113,16 +158,18 @@ export default function Page() {
 
     try {
       await audio.play();
+
       setPlaying(true);
       setHasInteracted(true);
-    } catch (err) {
-      console.error("Audio playback error:", err);
+    } catch (error) {
+      console.error("Audio playback error:", error);
     }
   };
 
-  // --------------------------------------------------
+  // =========================================================
   // Mute / Unmute
-  // --------------------------------------------------
+  // =========================================================
+
   const toggleAudioMute = () => {
     const audio = audioRef.current;
 
@@ -131,18 +178,56 @@ export default function Page() {
     const nextMuted = !audioMuted;
 
     audio.muted = nextMuted;
+
     setAudioMuted(nextMuted);
   };
 
-  // --------------------------------------------------
-  // Keyboard shortcuts
-  // Space = Play/Pause
-  // M = Mute
-  // --------------------------------------------------
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
+  // =========================================================
+  // Volume
+  // =========================================================
 
+  const handleVolumeChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const newVolume = Number(event.target.value);
+
+    setVolume(newVolume);
+
+    const audio = audioRef.current;
+
+    if (!audio) return;
+
+    /*
+      Moving the volume slider above 0 automatically
+      unmutes the audio.
+    */
+    if (newVolume > 0) {
+      audio.muted = false;
+      setAudioMuted(false);
+    }
+
+    /*
+      Volume at 0 behaves like mute.
+    */
+    if (newVolume === 0) {
+      audio.muted = true;
+      setAudioMuted(true);
+    }
+  };
+
+  // =========================================================
+  // Keyboard controls
+  //
+  // Space = Play / Pause
+  // M     = Mute
+  // =========================================================
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+
+      /*
+        Don't hijack keyboard controls while typing
+        or using the volume slider.
+      */
       if (
         target?.tagName === "INPUT" ||
         target?.tagName === "TEXTAREA" ||
@@ -151,13 +236,13 @@ export default function Page() {
         return;
       }
 
-      if (e.code === "Space") {
-        e.preventDefault();
-        togglePlay();
+      if (event.code === "Space") {
+        event.preventDefault();
+        void togglePlay();
       }
 
-      if (e.code === "KeyM") {
-        e.preventDefault();
+      if (event.code === "KeyM") {
+        event.preventDefault();
         toggleAudioMute();
       }
     };
@@ -169,15 +254,27 @@ export default function Page() {
     };
   }, [playing, audioMuted]);
 
+  // =========================================================
+  // Render
+  // =========================================================
+
   return (
     <main className="safar-page relative min-h-screen w-full overflow-hidden">
-      {/* Ambient effects */}
+      {/* =====================================================
+          VISUAL EFFECTS
+          ===================================================== */}
+
       <div className="ambient-shade" aria-hidden="true" />
+
       <div className="grain" aria-hidden="true" />
 
-      {/* ---------------------------------------------
+      {/* =====================================================
           AUDIO
-          --------------------------------------------- */}
+
+          Separate from the video.
+          Video remains completely muted.
+          ===================================================== */}
+
       <audio
         ref={audioRef}
         src={AUDIO_SRC}
@@ -186,10 +283,12 @@ export default function Page() {
         preload="auto"
       />
 
-      {/* ---------------------------------------------
+      {/* =====================================================
           BACKGROUND VIDEO
+
           ALWAYS MUTED
-          --------------------------------------------- */}
+          ===================================================== */}
+
       <video
         ref={videoRef}
         className="bg-video absolute inset-0 h-full w-full object-cover pointer-events-none"
@@ -198,25 +297,54 @@ export default function Page() {
         loop
         muted
         playsInline
+        preload="auto"
+        aria-hidden="true"
       />
 
-      {/* ---------------------------------------------
+      {/* =====================================================
           TITLE
-          --------------------------------------------- */}
-      <div className="absolute top-8 left-1/2 z-10 -translate-x-1/2 text-center pointer-events-none">
-        <h1 className="font-extrabold text-6xl md:text-7xl tracking-widest text-white/80 drop-shadow-2xl select-none">
+          ===================================================== */}
+
+      <div
+        className="
+          absolute
+          top-[24px]
+          left-1/2
+          z-10
+          -translate-x-1/2
+          text-center
+          pointer-events-none
+          w-full
+          px-4
+        "
+      >
+        <h1
+          className="
+            font-extrabold
+            text-5xl
+            sm:text-6xl
+            md:text-7xl
+            tracking-widest
+            text-white/80
+            drop-shadow-2xl
+            select-none
+          "
+        >
           सफ़र
         </h1>
       </div>
 
-      {/* ---------------------------------------------
+      {/* =====================================================
           BOTTOM PLAYER
-          --------------------------------------------- */}
+          ===================================================== */}
+
       <section className="bottom-player z-20" aria-label="Audio controls">
+        {/* Play / Pause */}
         <div className="player-controls">
           <button
+            type="button"
             className="deck-play"
-            onClick={togglePlay}
+            onClick={() => void togglePlay()}
             aria-label={playing ? "Pause music" : "Play music"}
           >
             {playing ? <Pause size={14} /> : <Play size={12} />}
@@ -228,8 +356,8 @@ export default function Page() {
         {/* Volume */}
         <div className="volume">
           <button
+            type="button"
             onClick={toggleAudioMute}
-            className="p-1 hover:text-white transition-colors"
             aria-label={audioMuted ? "Unmute audio" : "Mute audio"}
           >
             {audioMuted || volume === 0 ? (
@@ -244,17 +372,9 @@ export default function Page() {
             type="range"
             min="0"
             max="100"
+            step="1"
             value={audioMuted ? 0 : volume}
-            onChange={(e) => {
-              const newVolume = Number(e.target.value);
-
-              setVolume(newVolume);
-
-              if (newVolume > 0 && audioRef.current) {
-                audioRef.current.muted = false;
-                setAudioMuted(false);
-              }
-            }}
+            onChange={handleVolumeChange}
           />
         </div>
       </section>
